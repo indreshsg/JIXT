@@ -1,0 +1,2 @@
+# JIXT
+Journal Name Extractor
