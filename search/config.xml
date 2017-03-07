@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<data>
+	<journal_db_index path="..\journal_db\index_scimajor">
+	</journal_db_index>
+	<journal_db_file path="..\journal_db\scimajor_journalDB_rev1.csv">
+	</journal_db_file>
+	<java_home path="C:/Program Files (x86)/Java/jdk1.8.0_73/bin/java.exe">
+	</java_home>
+	<ner_jar_file path="D:/WorkDocs/RAWork/kits/NER/stanford_ner/stanford-ner.jar">
+	</ner_jar_file>
+	<ner_model_file path="D:/WorkDocs/RAWork/kits/NER/stanford_ner/classifiers/english.all.3class.distsim.crf.ser.gz">
+	</ner_model_file>
+</data>
