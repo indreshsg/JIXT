@@ -6,15 +6,20 @@
 Descp: Searches for journal names from the index created by Whoosh
 if match is found returns the title of the match
 
+To Execute Issue:
+    mpirun -np <No_Processor> python <parent_code.py>
+    
 Copyright: (c) 2016, Indresh Sira, The Ohio State University
 All rights reserved.
 ######################################################################
 ######################################################################
 """
-
 import re
 import os
 import sys
+import time
+import io
+
 import whoosh.index as index
 from whoosh.fields import *
 from whoosh.qparser import QueryParser
@@ -22,20 +27,32 @@ from whoosh.qparser import MultifieldParser
 import whoosh.qparser as Qparser
 from whoosh.query import FuzzyTerm
 from whoosh import scoring
+
 from fuzzywuzzy import process
 import load_config
-import calendar
-from difflib import SequenceMatcher
 import jellyfish
 import author_tagger
+import tame_string as tame_str
 
 glbl_quote_marker = 'aaaa'
+No_ResultMatch__ = "No result match"
 
 """
 Check if a given string has any digit
 """
 def hasNumbers(inputString):
     return any(char.isdigit() for char in inputString)
+    
+"""
+writes the result to stdout and result Log file
+"""
+def createLog(msgLst, outFile):
+    [journal, title, score] = msgLst
+    #Write the result to result FIle
+    if journal is None:
+        outFile.write("No Journal match, 0 \n")
+    else:
+        outFile.write(journal + ", " + title +", " + str(score) + '\n')
         
 """
 creates Ngram from a list
@@ -43,16 +60,6 @@ creates Ngram from a list
 def list_Ngrams(input_list, n):
   return list(zip(*[input_list[i:] for i in range(n)]))
     
-"""
-remove any month name from given list
-"""
-def removeMonth(str_lst):
-    for month_idx in range(1, 13):
-        month_name = calendar.month_name[month_idx].lower()
-        month_abbr = calendar.month_abbr[month_idx].lower()
-        str_lst = [each.replace(month_name, " ")  for each in str_lst]
-        str_lst = [each.replace(month_abbr, " ")  for each in str_lst]
-    return str_lst
     
 """
 Remove any http links present in the text
@@ -69,7 +76,6 @@ def similar(srch_str, lookup_lst):
     high_score = 0.0
     match_title = ''
     for each_item in lookup_lst:
-        #score = SequenceMatcher(None, srch_str, each_item).ratio()
         score = jellyfish.jaro_distance(srch_str, each_item)
         #print(srch_str + "|" + each_item + "|" + str(score))
         if score > high_score:
@@ -82,7 +88,7 @@ def similar(srch_str, lookup_lst):
 Get the index of the first marker from the given string
 """
 def marker_index(full_string):
-    spec_chars = set(""":?'";,0123456789!()~#@^&$%*""")
+    spec_chars = set(""":?'";.,0123456789!()~#@^&$%*{}|""")
     for chars in full_string:
         if chars in spec_chars:
             return full_string.index(chars)
@@ -96,11 +102,12 @@ def strip_using_marker(full_string, key_word):
     full_string = strip_http(full_string)
     
     #remove any of the following ()-?
-    full_string = re.sub('[-|.|\|/]', ' ', full_string)
-    
+    full_string = re.sub('[-]', '', full_string)
+    full_string = re.sub('[\|/]', ' ', full_string)
+        
     if key_word not in full_string:
         return None
-         
+        
     pivot = full_string.index(key_word)
     #Search for any special character from the pivot   
     rvrse_fullstr = ''.join(reversed(full_string[:pivot]))
@@ -116,9 +123,8 @@ def strip_using_marker(full_string, key_word):
     for i in range(0, len(prob_lst)):
         if prob_lst[i] == 'al':
             prob_name = (' ').join(prob_lst[i+1:])
-            break
-    #Remove any vol keyword
-    prob_name = re.sub(r'\bvol\b', ' ', prob_name)
+            break  
+                    
     return prob_name.strip()
     
 """
@@ -162,14 +168,40 @@ def hasJournal(journal_lst, info_str):
 """
 Gets the index from the first character of journal name
 """
+"""
+def get_alphaindex(name):
+    eucld_mean_val = 0
+    true_len = 0
+    name = name.lower()
+    name = name.strip()
+    first_word = name.split()[0]
+    for i in range(0, len(first_word)):
+        char = first_word[i]
+        if (char != ' ' and char != '-' and   \
+            char != '_' and char.isdigit() != True):
+            eucld_mean_val += (ord(char) - ord('a'))
+            true_len += 1
+    if true_len == 0:
+        return 0
+    bin = int((eucld_mean_val/ true_len))
+    if bin < 0:
+        msg = 'Error in finding bin! Bin Value= ' + str(bin)
+        sys.stdout.write(msg)
+    else:
+        return bin
+"""
+ 
 def get_alphaindex(name):
     alpha_index = name.lower()   
+    
     if alpha_index.isdigit():
         alpha_index = 0
     else:
         alpha_index = ord(alpha_index) - ord('a') + 1
         
     alpha_index = 0 if alpha_index > ord('z') else alpha_index
+    if alpha_index < 0:
+        alpha_index = 0 
     return alpha_index
     
 """
@@ -177,6 +209,7 @@ Search for quotes in the line and return the end of quotes
 If no quotes found return -1
 """
 def strip_Quote(line_str, quote_marker=None):
+    global glbl_quote_marker
     if quote_marker is None:
         quote_marker = glbl_quote_marker
         
@@ -190,16 +223,40 @@ def strip_Quote(line_str, quote_marker=None):
     #If the no of quotes is odd, return the same string back, else strip
     if first is -1 or last is -1:
         strip_strng =  line_str
+        marked_strng = " "
     else:
         strip_strng = line_str[:first] + quote_marker + line_str[last+1:]
+        marked_strng = line_str[first+1:last]
         
-    return strip_strng  
+    return [strip_strng, marked_strng]
     
+""" 
+Remove any numbers and split the string based on comma
+"""
+def sanitize(journal_str):
+    #Remove vol or volume label
+    sant_str = re.sub("(?i)vol\.","",journal_str)
+    sant_str = re.sub("(?i)volume\.","",sant_str)
+    
+    #Remove any hyperlink in the text
+    sant_str = strip_http(sant_str)
+                       
+    #Remove any quotes if present
+    [sant_str, marked_strng] = strip_Quote(sant_str)
+    
+    #Remove any special character and number
+    sant_str = re.sub('[^\wA-Za-z]', ' ', sant_str)
+    sant_str = re.sub('\d+', ' ', sant_str)
+    
+    jrnl_lst = sant_str.split()
+    return jrnl_lst
+        
 """
 From a given list of words, creates N-gram bucket pool
 Removes any numbers or special characters if present
 """   
 def create_Ngram(str_bucket):
+    global glbl_quote_marker
     #Remove special characters, numbers and then et al
     str_bucket = [re.sub(r'\bet\b', ' ', each) for each in str_bucket]
     str_bucket = [re.sub(r'\bal\b', ' ', each) for each in str_bucket]
@@ -208,9 +265,8 @@ def create_Ngram(str_bucket):
     str_bucket = [re.sub(r'\bno\b', ' ', each) for each in str_bucket]
     str_bucket = [re.sub(r'\beuropean\b', ' ', each) for each in str_bucket]
     str_bucket = [re.sub(r'\bny\b', ' ', each) for each in str_bucket]
-    #str_bucket = [re.sub(r'\bj\b', 'journal', each) for each in str_bucket]
-    #str_bucket = [re.sub(r'\bproc\b', 'proceeding', each) for each in str_bucket]
-    str_bucket = removeMonth(str_bucket)
+    str_bucket = [re.sub(r'\bunited states of america\b', 'usa', each) for each in str_bucket]
+    str_bucket = [re.sub(r'\b am j \b', 'american journal', each) for each in str_bucket]
       
     #Remove empty elemnts from end of list
     if str_bucket:
@@ -267,15 +323,14 @@ class jrnl_srch:
             db_lines = dbcsvFile.readlines()
             for db_line in db_lines:
                 [name, abbrv, type] = db_line.strip('\n').split("|")
-                
+               
                 alpha_index = get_alphaindex(name[0].lower())
-                
-                joint_abbrv = abbrv #"_".join(abbrv.split())
+                                
                 self.jrnl_DB_name_lst[alpha_index].append(name.lower())
-                self.jrnl_DB_abbrv_lst[alpha_index].append(joint_abbrv.lower())
+                self.jrnl_DB_abbrv_lst[alpha_index].append(abbrv.lower())
                 
-                DB_index = DB_index + 1                
-        print('Total Length of Database: ', DB_index)
+                DB_index = DB_index + 1  
+
         #------------- Create Searher Object for Whoosh -------------------#
         self.searcher = ix.searcher()#weighting=scoring.TF_IDF())
         self.title_parser = MultifieldParser(["title", "content"], ix.schema)
@@ -303,13 +358,21 @@ class jrnl_srch:
         for i in range(0, len(srch_result_lst)):
             [srch_str, result] = srch_result_lst[i]
             
+            if self.log_file != None:         
+                self.log_file.write(srch_str + '\n')
+            
             alpha_index = get_alphaindex(srch_str.strip(" ")[0])
-            title_match = process.extract( srch_str,   \
-                                           self.jrnl_DB_name_lst[alpha_index], \
-                                           limit=5)
+            
+            try:
+                title_match = process.extract( srch_str,   \
+                                               self.jrnl_DB_name_lst[alpha_index], \
+                                               limit=5)
+            except:
+                print("Index Error:", alpha_index, srch_str)
+                exit()
             abbrv_match = process.extract( srch_str, \
                                            self.jrnl_DB_abbrv_lst[alpha_index], \
-                                           limit=5)
+                                           limit=5)             
             for each_title in title_match:
                 title_repo.append(each_title[0])
                 
@@ -321,24 +384,24 @@ class jrnl_srch:
         return [title_repo, abbrv_repo]
         
     def get_best_match(self, Ngram_lst, full_str, threshold):
+        global No_ResultMatch__
         title_srch_result = []
         positive_grams = []
         #Search through the title list for matches and hold highest score
         for gram_str in Ngram_lst:
-            if len(gram_str.split(' ')) > 1:
-                srch_str = strip_using_marker(full_str, \
-                                              gram_str)
-            else:
-                srch_str = gram_str
+            srch_str = strip_using_marker(full_str, gram_str)
+                
+            #Continue is string is empty or its just single letter
             if srch_str is None:
+                continue           
+            if sum(c != ' ' for c in srch_str) <= 3:
                 continue
-            #srchquery = self.title_parser.parse(srch_str)
-            #results = self.searcher.search(srchquery)
-            if len(srch_str) != 0:                
+                                
+            if len(srch_str) != 0 and srch_str not in positive_grams:                
                 title_srch_result.append([srch_str, None])
                 #Store the first search the resulted in a hit
                 positive_grams.append(srch_str)
-                
+                                
         #Create a repositry of matching context and title from fuzzy search
         [title_repo, abbrv_repo] = self.fuzzy_search(title_srch_result)
         
@@ -361,11 +424,11 @@ class jrnl_srch:
                     score = abbrv_score
                 except:
                     continue
-            print('***'+gram_str)    
-            print(title, score)
+            sys.stdout.write('*** '+str(gram_str)+'\n')    
+            sys.stdout.write("%s %f\n" % (title, score))
             match_dict = {'title':title,'score':score,'str':gram_str}
             final_lst.append(match_dict)
-        
+
         max_score = 0
         #Get value with highest score and highest length
         if final_lst:
@@ -374,8 +437,8 @@ class jrnl_srch:
         
         #Threshold to classify journal names
         if max_score < threshold:
-            return ['No result match', max_score, None]
-            
+            return [No_ResultMatch__, max_score, None]
+               
         best_indx = []
         for i in range(0, len(final_lst)):
             match_dict = final_lst[i]
@@ -389,15 +452,16 @@ class jrnl_srch:
                       
     #Search for journal name across indexed database
     def get_journal(self, info_str): 
+        global No_ResultMatch__
         #First sanitize the input string
-        journal_lst = srch.sanitize(info_str)
+        journal_lst = sanitize(info_str)
         #Convert everything to lower case
         journal_lst = [each.lower() for each in journal_lst]    
-        manirated_info_str = strip_Quote(info_str.lower()," '")
-        manirated_info_str = self.authr_Tag.rmv_authors(manirated_info_str)
+        [manirated_info_str, article_title] = strip_Quote(info_str.lower()," '")
+        manirated_info_str = tame_str.manirate_citation(manirated_info_str)
+        #manirated_info_str = self.authr_Tag.rmv_authors(manirated_info_str)
         
-        print(manirated_info_str)
-        
+                
         ##------- Level 1: Search for 'journal' Tag --------
         #Check if text:'journal' is present
         [isPresent, journal_name] = hasJournal(journal_lst, info_str)
@@ -406,64 +470,147 @@ class jrnl_srch:
             prob_title_match = process.extractOne( journal_name,   \
                                                   self.jrnl_DB_name_lst[alpha_index])
             if prob_title_match[1] > 95:
-                return [prob_title_match[0], prob_title_match[1]]
-                
-        self.log_file.write(" ".join(journal_lst) + '\n')
+                return [prob_title_match[0], prob_title_match[1], article_title]
+        
+        if self.log_file != None:         
+            self.log_file.write(" ".join(journal_lst) + '\n')
         
         ##------- Level 2: 1-Gram Search --------
         #Search through 1-gram for best batch
         [best_title, max_score, final_lst] =  self.get_best_match(journal_lst, \
                                                    manirated_info_str, \
-                                                   0.95)
-        prob_jrnl_name = strip_using_marker(manirated_info_str \
-                                            ,best_title)
-        #Ensure if 1-gram is not an alias, buy verifying using markers
-        if prob_jrnl_name != None:
-            jaro_reldist = jellyfish.jaro_distance(prob_jrnl_name, best_title)
-            if jaro_reldist > 0.9:
-                return [best_title, max_score]
-        
+                                                   0.85)
+        if  best_title != No_ResultMatch__:
+            return [best_title, max_score, article_title]
+                                                           
         ##------- Level 3: N-Gram Pivoted Search --------
         #Create an Ngram list for first parsing
         Ngram_lst = create_Ngram(journal_lst)  
         [best_title, max_score, final_lst] =  self.get_best_match(Ngram_lst, \
                                                     manirated_info_str, \
-                                                    0.90)
-        return [best_title, max_score]
-          
-    #Remove any numbers and split the string based on comma
-    #and return the list
-    def sanitize(self, journal_str):
-        #Remove vol or volume label
-        sant_str = re.sub("(?i)vol\.","",journal_str)
-        sant_str = re.sub("(?i)volume\.","",sant_str)
+                                                    0.85)
+        return [best_title, max_score, article_title]
+                  
+"""
+Executes journal extarction on single line and collects data
+"""
+def execute_job(srch, line):
+    global No_ResultMatch__
+    myIO = io.StringIO()
+ 
+    string = line.split(",")
+    info_str = ",".join(string[1:])
+    info_str = str(line)
         
-        #Remove any hyperlink in the text
-        sant_str = strip_http(sant_str)
-                           
-        #Remove any quotes if present
-        sant_str = strip_Quote(sant_str)
-        
-        #Remove any special character and number
-        sant_str = re.sub('[^\wA-Za-z]', ' ', sant_str)
-        sant_str = re.sub('\d+', ' ', sant_str)
-        
-        jrnl_lst = sant_str.split()
-        return jrnl_lst
-        
-      
+    journal = No_ResultMatch__
+    score = 0
+    title = " "
+    
+    try:
+        sys.stdout.write(info_str)
+    except:
+        myIO.write("Unicode Error Detected\n")
+        return[journal, score, title, myIO]
+    
+    #Swap the IO's
+    my_stdout = sys.stdout
+    sys.stdout = myIO
+
+    try:
+        [journal, score, title] =  srch.get_journal(info_str)    
+        if journal == No_ResultMatch__:
+            title = " "
+    except:
+        pass
+    
+    sys.stdout = my_stdout
+    
+    return[journal, score, title, myIO]
 
 ### If run as standlone, run a test 
-if __name__ == "__main__": 
-    srch = jrnl_srch(True)
-    # while True:
-        # jrnl_str = input('Enter Journal Name:').lower()
-        # sanitize = srch.sanitize(jrnl_str)
-        # srch.try_journal(jrnl_str)
-
-    import time
+if __name__ == "__main__" and sys.platform == 'linux': 
+    from mpi4py import MPI
     avg_time = 0
-    out = open(sys.argv[2], 'w')
+    no_lines = int(sys.argv[3])
+    start_line = int(sys.argv[4]) - 1
+    
+    #Distribute the task to cores
+    comm = MPI.COMM_WORLD
+    size = comm.Get_size()
+    rank = comm.Get_rank()
+    
+    srch = jrnl_srch(False)
+
+    if rank == 0:            
+        out = open(sys.argv[2], 'w', errors='ignore')
+        with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as file:
+            #Skip to start line
+            for j in range(start_line):
+                try:
+                    file.readline()
+                except:
+                    continue
+            
+            
+            total_line = no_lines
+            while(no_lines > 0):
+                strt = time.time()
+                
+                #Enumerate the workload distribution
+                enum_procsr = [0]*size
+                for proc in range(0, size):
+                    if no_lines > 0:
+                        enum_procsr[proc] = total_line - no_lines + 1
+                        no_lines -= 1
+                    
+                for proc in range(1, size):
+                    if enum_procsr[proc] != 0:
+                        line = file.readline()
+                        comm.send(line, dest=proc, tag=1) 
+                                
+                line = file.readline()                                                
+                #Execute the Task
+                [journal, score, title, myIO] = execute_job(srch, line)
+                
+                for proc in range(1, size):
+                    if enum_procsr[proc] != 0:
+                        msg = comm.recv(source=proc, tag=2)
+                        createLog(msg, out)
+                                            
+                sys.stdout.write(myIO.getvalue())
+                sys.stdout.flush()
+                createLog([journal, title, score], out)
+                                        
+                end = time.time() - strt
+                avg_time = avg_time + end
+                sys.stdout.write('##############################\n')
+                sys.stdout.flush()
+        #Send Exit message to all threads
+        for proc in range(1, size):
+            comm.send("Exit", dest=proc, tag=1) 
+        sys.stdout.write('Complete!!! --> Average time per serach = %f\n' %(avg_time/total_line))
+        sys.stdout.flush()
+        out.close()
+    else:
+        while(True):
+            line = comm.recv(source=0, tag=1)
+            if line == "Exit":
+                break
+            [journal, score, title, myIO] = execute_job(srch, line)
+            
+            sys.stdout.write(myIO.getvalue())
+            sys.stdout.write('##############################\n')
+            sys.stdout.flush()
+            
+            myMsg = [journal, title, score]
+            comm.send(myMsg, dest=0, tag=2)
+            
+        sys.stdout.write("Terminating Job %d" %(rank))
+##If platform is win32, standalone script
+elif __name__ == "__main__" and sys.platform == 'win32':
+    srch = jrnl_srch(False)
+    avg_time = 0
+    out = open(sys.argv[2], 'w', errors='ignore')
     no_lines = int(sys.argv[3])
     start_line = int(sys.argv[4]) - 1
     with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as file:
@@ -478,39 +625,19 @@ if __name__ == "__main__":
             strt = time.time()
                 
             line = file.readline()                
-            # try:
-                # line = file.readline()
-            # except:
-                # print("Unicode error in line:" , i)
-                # out.write("No Journal match, 0 \n")
-                # continue
+                                                             
+            #Execute the Task
+            [journal, score, title, myIO] = execute_job(srch, line)
                 
-            string = line.split(",")
-            info_str = ",".join(string[1:])
-            info_str = str(line)
-            
-            if srch.log_file != None: 
-                srch.log_file.write('Line:' + str(i+1) + "\n")
-             
-            journal = None
-            # try:
-            [journal, score] = srch.get_journal(info_str)
-            # except:
-                # print("Exception Occured in line below ===>")
-                # print('Line : ',i+1,info_str)
-                # continue
-                
-            if journal is None:
-                out.write("No Journal match, 0 \n")
-            else:
-                out.write(journal + ", " + str(score) + '\n')
+            sys.stdout.write(myIO.getvalue())
+            sys.stdout.flush()
+            createLog([journal, title, score], out)
                 
             end = time.time() - strt
             avg_time = avg_time + end
-            print('Line:', (i+1),'|| Time taken = ', end)            
+            print('Line : ', i,'|| Time taken = ', end)            
 
     print('Complete!!! --> Average time per serach = ', (avg_time/no_lines))
     out.close()
-  
-
-
+    
+                
