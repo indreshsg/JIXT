@@ -2,7 +2,7 @@
 <data>
 	<journal_db_index path="..\journal_db\index_scimajor">
 	</journal_db_index>
-	<journal_db_file path="..\journal_db\scimajor_journalDB_rev1.csv">
+	<journal_db_file path="..\journal_db\scimajor_journalDB_rev3.csv">
 	</journal_db_file>
 	<java_home path="C:/Program Files (x86)/Java/jdk1.8.0_73/bin/java.exe">
 	</java_home>

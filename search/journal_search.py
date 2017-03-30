@@ -479,7 +479,7 @@ class jrnl_srch:
         #Search through 1-gram for best batch
         [best_title, max_score, final_lst] =  self.get_best_match(journal_lst, \
                                                    manirated_info_str, \
-                                                   0.85)
+                                                   0.95)
         if  best_title != No_ResultMatch__:
             return [best_title, max_score, article_title]
                                                            
@@ -613,6 +613,8 @@ elif __name__ == "__main__" and sys.platform == 'win32':
     out = open(sys.argv[2], 'w', errors='ignore')
     no_lines = int(sys.argv[3])
     start_line = int(sys.argv[4]) - 1
+    import pdb
+    pdb.set_trace()
     with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as file:
         #Skip to start line
         for j in range(start_line):
